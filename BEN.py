@@ -16,21 +16,20 @@ def Normalize(data1):
 def Gen_coder(X, H, v_num):
     # min_max_scaler = preprocessing.MinMaxScaler()
     # data = min_max_scaler.fit_transform(np.array(X[v_num]))
-    with tf.variable_scope('gencoder'+str(v_num)):
-        data = Normalize(X[v_num])
-        feature_dim = len(data)
-        gen_dense = tf.layers.dense(inputs=H,
-                                    units=500,
-                                    activation=tf.nn.sigmoid,
-                                    kernel_regularizer=tf.contrib.layers.l2_regularizer(0.01))
-        gen_dense = tf.layers.dense(inputs=gen_dense,
-                                    units=1000,
-                                    activation=tf.nn.sigmoid,
-                                    kernel_regularizer=tf.contrib.layers.l2_regularizer(0.01))
-        gen_out = tf.layers.dense(inputs=gen_dense,
-                                  units=feature_dim,
-                                  activation=tf.nn.sigmoid,
-                                  kernel_regularizer=tf.contrib.layers.l2_regularizer(0.01))
+    data = Normalize(X[v_num])
+    feature_dim = len(data)
+    gen_dense = tf.layers.dense(inputs=H,
+                                units=500,
+                                activation=tf.nn.sigmoid,
+                                kernel_regularizer=tf.contrib.layers.l2_regularizer(0.01))
+    gen_dense = tf.layers.dense(inputs=gen_dense,
+                                units=1000,
+                                activation=tf.nn.sigmoid,
+                                kernel_regularizer=tf.contrib.layers.l2_regularizer(0.01))
+    gen_out = tf.layers.dense(inputs=gen_dense,
+                              units=feature_dim,
+                              activation=tf.nn.sigmoid,
+                              kernel_regularizer=tf.contrib.layers.l2_regularizer(0.01))
     return gen_out
 
 def Discriminator(latent_input, labels, reuse=False):
@@ -97,17 +96,16 @@ def model_loss(X, Y, H, view_num, class_num):
                                                                          labels=valid))
     d_loss_fake = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=d_out_fake,
                                                                          labels=fake))
-    H_loss = d_loss_fake+gen_loss
+    H_loss = d_loss_fake
     d_loss = d_loss_fake+d_loss_real
     return gen_loss, d_loss, H_loss
 
 def model_op(H, gen_loss, d_loss, H_loss):
     t_vars = tf.trainable_variables()
-    g_vars = [var for var in t_vars if var.name.startswith('gencoder')]
     d_vars = [var for var in t_vars if var.name.startswith('discriminator')]
-    gen_train_opt = tf.train.RMSPropOptimizer(0.01).minimize(gen_loss, var_list=g_vars)
-    d_train_opt = tf.train.RMSPropOptimizer(0.001).minimize(d_loss, var_list=d_vars)
-    H_train_opt = tf.train.RMSPropOptimizer(0.001).minimize(H_loss, var_list=H)
+    gen_train_opt = tf.train.GradientDescentOptimizer(0.01).minimize(gen_loss)
+    d_train_opt = tf.train.AdamOptimizer(0.001).minimize(d_loss, var_list=d_vars)
+    H_train_opt = tf.train.AdamOptimizer(0.001).minimize(H_loss, var_list=H)
     return gen_train_opt, d_train_opt, H_train_opt
 
 if __name__ == '__main__':
