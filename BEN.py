@@ -5,6 +5,18 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.io import loadmat
 import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.neighbors import KNeighborsClassifier as knn
+from sklearn.metrics import classification_report
+from sklearn.metrics import accuracy_score
+import os
+
+os.environ['CUDA_VISIBLE_DEVICES']='1, 3'
+
+def split(dataset, labels, test_size=0.3):
+    x_train, x_test, y_train, y_test = train_test_split(dataset.T, labels, test_size=test_size,
+                                                    random_state=1)
+    return x_train, x_test, y_train, y_test
 
 # Data Normalization
 def Normalize(data1):
@@ -13,23 +25,24 @@ def Normalize(data1):
     mn = np.min(data1)
     return (data1-m)/(mx-mn)
 
-def Gen_coder(X, H, v_num):
+def Gen_coder(X, H, v_num, reuse=False):
     # min_max_scaler = preprocessing.MinMaxScaler()
     # data = min_max_scaler.fit_transform(np.array(X[v_num]))
-    data = Normalize(X[v_num])
-    feature_dim = len(data)
-    gen_dense = tf.layers.dense(inputs=H,
-                                units=500,
-                                activation=tf.nn.sigmoid,
-                                kernel_regularizer=tf.contrib.layers.l2_regularizer(0.01))
-    gen_dense = tf.layers.dense(inputs=gen_dense,
-                                units=1000,
-                                activation=tf.nn.sigmoid,
-                                kernel_regularizer=tf.contrib.layers.l2_regularizer(0.01))
-    gen_out = tf.layers.dense(inputs=gen_dense,
-                              units=feature_dim,
-                              activation=tf.nn.sigmoid,
-                              kernel_regularizer=tf.contrib.layers.l2_regularizer(0.01))
+    with tf.variable_scope('gencoder' + str(v_num), reuse=reuse):
+        data = Normalize(X[v_num])
+        feature_dim = len(data)
+        gen_dense = tf.layers.dense(inputs=H,
+                                    units=500,
+                                    activation=tf.nn.relu,
+                                    kernel_regularizer=tf.contrib.layers.l2_regularizer(0.01))
+        gen_dense = tf.layers.dense(inputs=gen_dense,
+                                    units=1000,
+                                    activation=tf.nn.relu,
+                                    kernel_regularizer=tf.contrib.layers.l2_regularizer(0.01))
+        gen_out = tf.layers.dense(inputs=gen_dense,
+                                  units=feature_dim,
+                                  activation=tf.nn.tanh,
+                                  kernel_regularizer=tf.contrib.layers.l2_regularizer(0.01))
     return gen_out
 
 def Discriminator(latent_input, labels, reuse=False):
@@ -96,49 +109,116 @@ def model_loss(X, Y, H, view_num, class_num):
                                                                          labels=valid))
     d_loss_fake = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=d_out_fake,
                                                                          labels=fake))
-    H_loss = d_loss_fake
+    H_loss = d_loss_fake+gen_loss
     d_loss = d_loss_fake+d_loss_real
     return gen_loss, d_loss, H_loss
 
-def model_op(H, gen_loss, d_loss, H_loss):
+def model_op(H, num_epoch, gen_lr, gen_loss, d_loss, H_loss):
     t_vars = tf.trainable_variables()
     d_vars = [var for var in t_vars if var.name.startswith('discriminator')]
-    gen_train_opt = tf.train.GradientDescentOptimizer(0.01).minimize(gen_loss)
-    d_train_opt = tf.train.AdamOptimizer(0.001).minimize(d_loss, var_list=d_vars)
-    H_train_opt = tf.train.AdamOptimizer(0.001).minimize(H_loss, var_list=H)
+    gen_train_opt = tf.train.RMSPropOptimizer(gen_lr).minimize(gen_loss, global_step=num_epoch)
+    d_train_opt = tf.train.RMSPropOptimizer(0.001).minimize(d_loss, var_list=d_vars)
+    H_train_opt = tf.train.RMSPropOptimizer(0.001).minimize(H_loss, var_list=H)
     return gen_train_opt, d_train_opt, H_train_opt
+
+def test(H, H_test, training_labels, testing_data, testing_labels, view_num, train=True):
+    with tf.name_scope('test'):
+        test_loss = 0
+        for v_num in range(view_num):
+            gte_out = Gen_coder(testing_data, H_test, v_num, reuse=True)
+            tdata = Normalize(np.transpose(testing_data[v_num]))
+            v_loss = tf.norm(gte_out - tdata, ord='euclidean')
+            test_loss += v_loss
+        test_epoch = tf.Variable(0, trainable=False)
+        test_lr = tf.train.natural_exp_decay(learning_rate=1e-4, global_step=test_epoch,
+                                            decay_steps=1500, decay_rate=0.9, staircase=False)
+        H_test_op = tf.train.RMSPropOptimizer(learning_rate=test_lr).minimize(test_loss, var_list=H_test)
+        # Fit H_test
+        uninitial_vars = [var for var in tf.all_variables() if 'test' in var.name]
+        initt = tf.variables_initializer(uninitial_vars)
+        sess.run(initt)
+        if train == True:
+            for epoch in range(10000):
+                sess.run(test_lr)
+                sess.run(H_test_op)
+                t_loss = test_loss.eval()
+                if epoch%100 == 0:
+                    print(epoch, "epoch\ntest_loss=%f" %t_loss)
+            Ht_latent = H_test.eval()
+            Ht_latent_ = pd.DataFrame(Ht_latent)
+            Ht_latent_.to_csv('H_test.csv', header=False, index=False)
+        clf = (knn())
+        clf.fit(np.array(H.eval()), training_labels.ravel())
+        pred_y = clf.predict(np.array(H_test.eval()))
+        print(accuracy_score(testing_labels, pred_y, normalize=True) )
+    return classification_report(testing_labels,pred_y)
 
 if __name__ == '__main__':
     # Obtain data and process
-    data_mat = loadmat(r"C:\Users\Young Geng\Desktop\gLMSC\handwritten1.mat")
+    data_mat = loadmat(r"/home/gengyu/datasets/handwritten1.mat")
     view_num = len(data_mat['X'][0])
     X = np.split(data_mat['X'], view_num, axis=1)
     Y = data_mat['gt']
     class_num = len(np.unique(Y))
-    N = len(Y)               # Get sample size
-    D_data = np.zeros([view_num], dtype=int)        # Get feature dimension for every view
+    N = len(Y)  # Get sample size
+    datasets = []
     x_train = []
-    H = tf.Variable(tf.random.normal([N, 100], mean=0.0, stddev=1e-6),name='H')             # Latent space variable
-    # H = tf.Variable(tf.zeros([N, 100]), name='H')
+    x_test = []
     for v_num in range(view_num):
-        x_train.append(X[v_num][0][0])              # Simplize data frame
-        D_data[v_num] = len(X[v_num][0][0])
-    gen_loss, d_loss, H_loss = model_loss(x_train, Y, H, view_num, class_num)
-    gen_op, d_op, H_op = model_op(H, gen_loss, d_loss, H_loss)
-    tvars = tf.trainable_variables()
+        datasets.append(X[v_num][0][0])  # Simplize data frame
+        x_tr, x_te, y_train, y_test = split(datasets[v_num], Y, test_size=0.3)
+        x_train.append(x_tr.T), x_test.append(x_te.T)
+    tr_size = len(y_train)
+    te_size = len(y_test)
+    ytr = pd.DataFrame(y_train)
+    ytr.to_csv('ytr.csv', header=False, index=False)
+    yte = pd.DataFrame(y_test)
+    yte.to_csv('yte.csv', header=False, index=False)
+    # Latent space variable
+    H = tf.Variable(tf.random.normal([tr_size, 100], mean=0.0, stddev=1e-6),name='H')
+    H_test = tf.Variable(tf.random.normal([te_size, 100], mean=0.0, stddev=1e-6), name='test_H')
+    gen_loss, d_loss, H_loss = model_loss(x_train, y_train, H, view_num, class_num)
+    # Learning rate decay
+    num_epoch = tf.Variable(0, trainable=False)
+    gen_lr = tf.train.natural_exp_decay(learning_rate=0.001, global_step=num_epoch,
+                                decay_steps=1500, decay_rate=0.9, staircase=True)
+    gen_op, d_op, H_op = model_op(H, num_epoch, gen_lr, gen_loss, d_loss, H_loss)
+    # Save the value
+    saver = tf.train.Saver()
+
     # Training
     with tf.Session() as sess:
         init = tf.global_variables_initializer()
         sess.run(init)
-        for epoch in range(30):
+        # Restore saved variables
+        try:
+            saver.restore(sess, "/home/gengyu/pyproject/tmp/vars.ckpt")
+            print("Checkpoint restored successfully!")
+            epochs = 0
+        except ValueError:
+            print("Not find a checkpoint file.\nReset all variables.")
+            epochs = 10000
+        except tf.errors.NotFoundError:
+            print("Directory doesn't exist.\nReset all variables.")
+            epochs = 10000
+        else:
+            print("Checkpoint restored successfully!")
+        for epoch in range(epochs):
             sess.run([gen_op, d_op])
             g_loss = gen_loss.eval()
-            print(epoch, "epoch\ngen_loss=%f,des_loss=" %g_loss, d_loss.eval())
-            plt.plot(epoch, g_loss, 'ro')
-            if epoch > 10:
+            if epoch%100 ==0:
+                print(gen_lr.eval())
+                print(epoch, "epoch\ngen_loss=%f,dis_loss=%f,H_loss=%f" %(g_loss, d_loss.eval(), H_loss.eval()))
+            if epoch > 100:
                 sess.run(H_op)
-        plt.show()
         H_latent = H.eval()
         H_latent_ = pd.DataFrame(H_latent)
         H_latent_.to_csv('H.csv', header=False, index=False)
-
+        # Save
+        save_path = saver.save(sess, "/home/gengyu/pyproject/tmp/vars.ckpt")
+        print("Model saved in path: %s" % save_path)
+        # Testing
+        train_ac = test(H, H, y_train, x_train, y_train, view_num, train=False)
+        print(train_ac)
+        test_ac = test(H, H_test, y_train, x_test, y_test, view_num)
+        print(test_ac)
